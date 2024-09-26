@@ -19,12 +19,13 @@ class TransformerPolicyNetwork(nn.Module):
         logits = outputs.logits  # Shape: (batch_size, seq_len, vocab_size)
         return logits
 
-    def generate_action(self, input_prompt, max_length=50):
+    def generate_thought(self, input_prompt, max_length=50):  # {{ edit_1 }}
         input_ids = self.tokenizer.encode(input_prompt, return_tensors='pt').to(device)
         attention_mask = torch.ones_like(input_ids).to(device)
         logits = self.forward(input_ids, attention_mask)
-        # Sample action from logits
+        # Sample thought from logits
         probs = F.softmax(logits[:, -1, :], dim=-1)
         action_id = torch.multinomial(probs, num_samples=1)
         action_text = self.tokenizer.decode(action_id[0])
-        return action_text, input_ids, attention_mask
+        student_logits = logits  # {{ edit_2 }}
+        return action_text, student_logits, input_ids, attention_mask

@@ -7,11 +7,14 @@ from transformers import (
     ViTImageProcessor,
     Wav2Vec2Processor,
     GPT2Tokenizer,
-    GPT2Model,
+    GPT2LMHeadModel,
     AdamW,
 )
 from torch.optim.lr_scheduler import StepLR
 from torch.utils.data import DataLoader, Dataset
+from torch.nn import MSELoss
+# Import additional modules for unsupervised learning
+import torch.optim as optim
 import numpy as np
 import json
 import requests
@@ -25,18 +28,19 @@ import faiss
 import torchaudio
 import pyautogui
 import whisper  # {{ Added for Whisper integration }}
+from studentteacher import StudentTeacherModel
+from omnitransformer import OmniModalTransformer
 from transformers import VideoMAEModel, VideoMAEConfig  # {{ Added for Video Encoder }}
-
+from reward import TransformerRewardModel 
+from record_audio import record_audio
+from record_video import record_screen
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from studentteacher import StudentTeacherModel
-from omnitransformer import OmniModalTransformer
-
-# Import additional modules for unsupervised learning
-import torch.optim as optim
-from torch.nn import MSELoss
+# Suppress FP16 warning
+import warnings
+warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
 
 # List available torchaudio backends
 logger.info("Available torchaudio backends: %s", torchaudio.list_audio_backends())
@@ -51,13 +55,17 @@ np.random.seed(42)
 
 # Define modality-specific tokenizers and models
 # Text
-text_tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
-text_model = AutoModel.from_pretrained("bert-base-uncased").to(device_type)
-logger.info("Loaded text tokenizer and model.")
+text_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+text_model = GPT2LMHeadModel.from_pretrained("gpt2", output_hidden_states=True).to(device_type)
+text_model.train()  # Set student model to train mode
+logger.info("Loaded aligned text tokenizer and model.")
 
 # Audio
 audio_processor = Wav2Vec2Processor.from_pretrained("facebook/wav2vec2-base-960h")
-audio_model = AutoModel.from_pretrained("facebook/wav2vec2-base-960h").to(device_type)
+audio_model = AutoModel.from_pretrained(
+    "facebook/wav2vec2-base-960h",
+    output_hidden_states=True  # {{ edit_1 }}
+).to(device_type)
 logger.info("Loaded audio processor and model.")
 
 # Video
@@ -68,7 +76,7 @@ logger.info("Loaded video image processor and model.")
 # Import and initialize the pretrained LLM
 # Initialize GPT-2 tokenizer and model for target generation
 llm_tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-llm_model = GPT2Model.from_pretrained("gpt2").to(device_type)
+llm_model = GPT2LMHeadModel.from_pretrained("gpt2").to(device_type)
 llm_model.eval()  # Set LLM to evaluation mode since it's used for target generation
 logger.info("Loaded pretrained LLM for target generation.")
 
@@ -84,9 +92,14 @@ logger.info(f"Using hidden size: {hidden_size}")
 # Pass llm_hidden_size to OmniModalTransformer
 api_url = ""  # Make sure to provide the actual API URL
 student_model = OmniModalTransformer(hidden_size, llm_hidden_size, api_url).to(device_type)
-teacher_model = AutoModel.from_pretrained("bert-large-uncased").to(device_type)
-model = StudentTeacherModel(student_model, teacher_model).to(device_type)
-logger.info("Initialized Student-Teacher Model.")
+teacher_model = GPT2LMHeadModel.from_pretrained("gpt2").to(device_type)
+teacher_model.eval()  # Set teacher model to evaluation mode
+
+# Initialize Reward Model
+reward_model = TransformerRewardModel(model_name="gpt2")  # Initialize with appropriate model
+# Initialize Student-Teacher Model with Reward Model
+model = StudentTeacherModel(student_model, teacher_model, reward_model).to(device_type)
+logger.info("Initialized Student-Teacher Model with Reward Model.")
 
 # Optimizer and Scheduler
 optimizer = AdamW(model.parameters(), lr=1e-5)
@@ -104,7 +117,6 @@ video_encoder_config = VideoMAEConfig.from_pretrained("MCG-NJU/videomae-base")
 video_encoder = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base").to(device_type)
 logger.info("Loaded Video Encoder model.")
 
-import threading  # {{ Added for threading }}
 
 # Update DURATION to capture 160 frames at 20 FPS
 DURATION = 8  # Increased from 5 to 8 seconds
@@ -141,151 +153,6 @@ def record_audio_and_screen(audio_filename, screen_filename, duration, desired_n
     thread_screen.join()
 
     return audio_result['audio_tensor'], audio_result['audio_text_inputs'], screen_result['video_embeddings']
-
-def record_audio(filename="user_audio.wav", duration=5):
-    CHUNK = 1024
-    FORMAT = pyaudio.paInt16
-    CHANNELS = 1
-    RATE = 16000
-
-    p = pyaudio.PyAudio()
-
-    # List all available input devices
-    info = p.get_host_api_info_by_index(0)
-    numdevices = info.get('deviceCount')
-    for i in range(0, numdevices):
-        device = p.get_device_info_by_host_api_device_index(0, i)
-        if device.get('maxInputChannels') > 0:
-            print(f"Input Device id {i} - {device.get('name')}")
-
-    # Select the Logi Webcam Microphone (replace with your device ID if different)
-    audio_index = 1  # Change this to 2 to select the Logi C270 HD Webcam microphone
-    print(f"Using input device id {audio_index}")
-
-    logger.info(f"Recording audio for {duration} seconds.")
-    stream = p.open(format=FORMAT,
-                    channels=CHANNELS,
-                    rate=RATE,
-                    input=True,
-                    frames_per_buffer=CHUNK,
-                    input_device_index=audio_index)  # Specify device index
-
-    frames = []
-    start_time = time.time()
-
-    while time.time() - start_time < duration:
-        data = stream.read(CHUNK)
-        frames.append(data)
-
-    stream.stop_stream()
-    stream.close()
-    p.terminate()
-
-    wf = wave.open(filename, 'wb')
-    wf.setnchannels(CHANNELS)
-    wf.setsampwidth(p.get_sample_size(FORMAT))
-    wf.setframerate(RATE)
-    wf.writeframes(b''.join(frames))
-    wf.close()
-
-    # Load audio using torchaudio
-    try:
-        print(f"Loading audio file with torchaudio: {filename}")  # {{ edit_7 }}
-        waveform, sample_rate = torchaudio.load(filename)  # {{ edit_1 }}
-        if sample_rate != RATE:
-            # Resample if necessary
-            resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=RATE)
-            waveform = resampler(waveform)
-            print(f"Resampled waveform shape: {waveform.shape}")  # {{ edit_resample }}
-        # If stereo, convert to mono
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)
-            print(f"Converted to mono waveform shape: {waveform.shape}")  # {{ edit_mono }}
-        audio_tensor = waveform.to(device_type)  # {{ edit_2 }}
-        print(f"audio_tensor shape: {audio_tensor.shape}")  # {{ edit_1 }}
-
-        transcript = whisper_model.transcribe(filename)
-        print(f"Transcription result: {transcript}")  # {{ edit_3 }}
-        audio_text = transcript['text']
-        print(f"Transcribed text: {audio_text}")  # {{ edit_4 }}
-        
-        # Tokenize transcribed text for the teacher model
-        audio_text_inputs = text_tokenizer(
-            audio_text, return_tensors='pt', truncation=True, max_length=128
-        ).to(device_type)
-    except Exception as e:
-        logger.error(f"Failed to load or transcribe audio with torchaudio: {e}")  # {{ edit_5 }}
-        audio_tensor = torch.zeros((1, RATE * duration), dtype=torch.float).to(device_type)  # {{ edit_6 }}
-        audio_text_inputs = None  # Handle absence of transcription
-    
-    return audio_tensor, audio_text_inputs  # Return tensors only
-
-def record_screen(filename="user_screen.mp4", duration=8, desired_num_frames=160):
-    print(f"Recording screen for {duration} seconds.")
-    # OpenCV screen recording setup
-    screen_width = 1920
-    screen_height = 1080
-    fps = 20.0
-
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(filename, fourcc, fps, (screen_width, screen_height))
-
-    start_time = time.time()
-
-    while time.time() - start_time < duration:
-        img = pyautogui.screenshot()
-        frame = np.array(img)
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        out.write(frame)
-
-    out.release()
-
-    # Load video frames
-    cap = cv2.VideoCapture(filename)
-    frames = []
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frame = cv2.resize(frame, (224, 224))
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frame = video_feature_extractor(images=frame, return_tensors="pt")['pixel_values']
-        frames.append(frame)
-    cap.release()
-
-    print(f"Total frames captured: {len(frames)}")  # {{ edit_1 }}
-
-    # Resample frames to desired_num_frames
-    if len(frames) > desired_num_frames:
-        indices = np.linspace(0, len(frames)-1, desired_num_frames).astype(int)
-        frames = [frames[i] for i in indices]
-        print(f"Resampled frames to {desired_num_frames}")  # {{ edit_2 }}
-    elif len(frames) < desired_num_frames:
-        if len(frames) == 0:
-            # If no frames were captured, create dummy frames
-            dummy_frame = torch.zeros((1, 3, 224, 224), dtype=torch.float).to(device_type)
-            frames = [dummy_frame for _ in range(desired_num_frames)]
-            print("No frames captured; filled with zeros.")  # {{ edit_3 }}
-        else:
-            # Pad with the last captured frame to reach desired_num_frames
-            last_frame = frames[-1]
-            while len(frames) < desired_num_frames:
-                frames.append(last_frame)
-            print(f"Padded frames to {desired_num_frames}")  # {{ edit_4 }}
-
-    video_input = torch.cat(frames, dim=0).unsqueeze(0).to(device_type)
-    print(f"video_input shape after to(device): {video_input.shape}")  # Should now have 5 dimensions
-    
-    # Process video through video encoder
-    with torch.no_grad():
-        video_embeddings = video_encoder(video_input).last_hidden_state  # Shape: [num_frames, hidden_size]
-    print(f"video_embeddings shape: {video_embeddings.shape}")  # Added for debugging
-    
-    # Optionally aggregate video embeddings (e.g., mean pooling)
-    video_embeddings = video_embeddings.mean(dim=0, keepdim=True)  # Shape: [1, hidden_size]
-    print(f"Aggregated video_embeddings shape: {video_embeddings.shape}")  # Added for debugging
-    
-    return video_embeddings  # Return video embeddings
 
 # Real-Time Interaction Loop
 def real_time_interaction():
@@ -346,15 +213,21 @@ def real_time_interaction():
 
         # Preprocess inputs
         # Text embeddings
-        text_embeddings = text_model(**text_inputs).last_hidden_state  # (1, seq_len, hidden_size)
+        text_embeddings = text_model(**text_inputs).hidden_states[-1]  # (1, seq_len, hidden_size)
         # Audio embeddings
         audio_inputs = audio_processor(audio_tensor.squeeze(0), sampling_rate=16000, return_tensors="pt")
         audio_inputs = {k: v.to(device_type) for k, v in audio_inputs.items()}
-        audio_embeddings = audio_model(**audio_inputs).last_hidden_state  # (1, seq_len, hidden_size)
+        audio_output = audio_model(**audio_inputs)
+        if audio_output.hidden_states is not None:
+            audio_embeddings = audio_output.hidden_states[-1]  # (1, seq_len, hidden_size)
+        else:
+            logger.error("audio_model did not return hidden_states.")
+            # Handle the absence of hidden_states appropriately
+            audio_embeddings = torch.zeros((1, 1, hidden_size), dtype=torch.float).to(device_type)
         # Video embeddings are already obtained
         # Transcribed audio text embeddings
         if audio_text_inputs is not None:
-            audio_text_embeddings = text_model(**audio_text_inputs).last_hidden_state  # (1, seq_len, hidden_size)
+            audio_text_embeddings = text_model(**audio_text_inputs).hidden_states[-1]  # (1, seq_len, hidden_size)
             print(f"audio_text_embeddings shape: {audio_text_embeddings.shape}")  # Added for debugging
         else:
             audio_text_embeddings = torch.zeros((1, 1, hidden_size), dtype=torch.float).to(device_type)
@@ -373,8 +246,9 @@ def real_time_interaction():
         # Ensure all embeddings have the same hidden size
         hidden_sizes = [emb.shape[2] if emb.ndim == 3 else emb.shape[1] for emb in [text_embeddings, audio_embeddings, video_embeddings, audio_text_embeddings]]
         if len(set(hidden_sizes)) != 1:
+            logger.error(f"Hidden size mismatch among embeddings: {hidden_sizes}")
             raise ValueError(f"Hidden size mismatch among embeddings: {hidden_sizes}")
-
+        
         # Example projection layers if necessary
         projection_layer_audio = nn.Linear(audio_embeddings.size(-1), hidden_size).to(device_type)
         projection_layer_video = nn.Linear(video_embeddings.size(-1), hidden_size).to(device_type)
@@ -384,10 +258,14 @@ def real_time_interaction():
         video_embeddings = projection_layer_video(video_embeddings)
         audio_text_embeddings = projection_layer_audio_text(audio_text_embeddings)
 
-        # Now concatenate
+        # Ensure video_embeddings has 3 dimensions
+        video_embeddings = video_embeddings.unsqueeze(1)  # Shape: [1, 1, hidden_size]
+        print(f"video_embeddings shape after unsqueeze: {video_embeddings.shape}")  # Debug
+
         unified_embedding = torch.cat(
-            [text_embeddings, audio_embeddings, video_embeddings, audio_text_embeddings], dim=1  # Concatenate along sequence length
-        )  # Shape: (batch_size, total_seq_len, hidden_size)
+            [text_embeddings, audio_embeddings, video_embeddings, audio_text_embeddings], dim=1
+        )
+        print(f"unified_embedding shape: {unified_embedding.shape}")  # Debug
 
         # Generate response
         input_prompt = text_input_str if (user_choice.lower() == 't' and text_input_str.strip() != '') else "User provided audio and video inputs."
@@ -411,14 +289,21 @@ def real_time_interaction():
         print("Assistant (Speech Output): [Speech output generated]")
 
         # Real-time learning (update model parameters)
-        _, loss = model(text_inputs, audio_tensor, video_input, unified_embedding)
+        student_outputs, loss, reward = model(
+            text_inputs,
+            audio_tensor,
+            video_input,
+            unified_embedding,
+            input_prompt  # {{ edit: pass input_prompt to the model }}
+        )
 
         total_loss = loss 
-
+        
         print(f"Total Loss: {total_loss.item()}")
 
         optimizer.zero_grad()
         total_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # {{ edit_7 }}
 
         # Optional: If using a separate optimizer for unsupervised components
         # unsup_optimizer.zero_grad()
@@ -437,7 +322,6 @@ def real_time_interaction():
 
         # Update Memory System
         student_model.memory_system.add_memory(unified_embedding.mean(dim=1), input_prompt)
-
 
 # Example usage
 if __name__ == "__main__":

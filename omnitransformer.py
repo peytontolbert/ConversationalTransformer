@@ -6,7 +6,7 @@ from reward import TransformerRewardModel
 from iterationofthought import IterationOfThought
 from decoder import MultiModalDecoder
 from encoder import LiquidTransformerEncoder
-from transformers import GPT2Model  # Ensure necessary imports if required
+from transformers import GPT2LMHeadModel  # Ensure necessary imports if required
 
 # Omni-Modal Transformer Model
 class OmniModalTransformer(nn.Module):
