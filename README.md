@@ -20,7 +20,16 @@ The Omni-Modal Transformer Based AGI Framework is designed to integrate multiple
 
 ### High-Level Architecture
 
-![Architecture Diagram](assets/architecture_diagram.png) *(Note: Include an actual diagram in the assets folder.)*
+```mermaid
+graph TD
+    Data_Ingestion[Data Ingestion] --> LiquidTransformerEncoder[LiquidTransformerEncoder]
+    LiquidTransformerEncoder --> IterationOfThought[IterationOfThought]
+    IterationOfThought --> TransformerPolicyNetwork[TransformerPolicyNetwork]
+    IterationOfThought --> TransformerRewardModel[TransformerRewardModel]
+    IterationOfThought --> MemorySystem[MemorySystem]
+    IterationOfThought --> MultiModalDecoder[MultiModalDecoder]
+    IterationOfThought --> ToolInteractionModule[ToolInteractionModule]
+```
 
 ### Main Components
 - **Main Module (`main.py`):** Orchestrates the system initialization and real-time interaction loop.
@@ -504,7 +513,7 @@ student_model = OmniModalTransformer(hidden_size, api_url).to(device)
 - **"Error during model forward pass":** An exception occurred during the model's forward computation.
 
 ### Logging Practices
-The system uses Python’s `logging` module configured at the `INFO` level for debugging purposes. Key events and errors are logged to provide insights into the system's operations.
+The system uses Python's `logging` module configured at the `INFO` level for debugging purposes. Key events and errors are logged to provide insights into the system's operations.
 
 **Example Logs:**
 ```
