@@ -1,8 +1,7 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+import whisper
 from transformers import (
-    AutoTokenizer,
     AutoModel,
     ViTImageProcessor,
     Wav2Vec2Processor,
@@ -11,35 +10,23 @@ from transformers import (
     AdamW,
 )
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.data import DataLoader, Dataset
 from torch.nn import MSELoss
 # Import additional modules for unsupervised learning
-import torch.optim as optim
 import numpy as np
-import json
-import requests
-import threading
-import time
-import cv2
-import pyaudio
-import wave
 import logging
-import faiss
 import torchaudio
-import pyautogui
-import whisper  # {{ Added for Whisper integration }}
+import warnings
 from studentteacher import StudentTeacherModel
 from omnitransformer import OmniModalTransformer
 from transformers import VideoMAEModel, VideoMAEConfig  # {{ Added for Video Encoder }}
 from reward import TransformerRewardModel 
-from record_audio import record_audio
-from record_video import record_screen
+from record_audio_and_screen import record_audio_and_screen
+from record_video import record_screen  # Ensure you import necessary functions
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Suppress FP16 warning
-import warnings
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
 
 # List available torchaudio backends
@@ -112,47 +99,13 @@ unsup_loss_function = MSELoss()
 # Initialize Whisper model
 whisper_model = whisper.load_model("base")  # You can choose appropriate model size
 
-# Initialize Video Encoder
-video_encoder_config = VideoMAEConfig.from_pretrained("MCG-NJU/videomae-base")
+# Centralized Video Encoder Initialization
 video_encoder = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base").to(device_type)
 logger.info("Loaded Video Encoder model.")
 
-
 # Update DURATION to capture 160 frames at 20 FPS
 DURATION = 8  # Increased from 5 to 8 seconds
-
-def record_audio_and_screen(audio_filename, screen_filename, duration, desired_num_frames=160):
-    audio_result = {}
-    screen_result = {}
-
-    def audio_thread():
-        audio_tensor, audio_text_inputs = record_audio(audio_filename, duration)
-        audio_result['audio_tensor'] = audio_tensor
-        audio_result['audio_text_inputs'] = audio_text_inputs
-
-    def screen_thread():
-        try:
-            video_embeddings = record_screen(screen_filename, duration, desired_num_frames)
-            screen_result['video_embeddings'] = video_embeddings
-        except Exception as e:
-            logger.error(f"Failed to record screen: {e}")  # {{ edit_5 }}
-            # Create dummy video embeddings in case of failure
-            video_embeddings = torch.zeros((1, hidden_size), dtype=torch.float).to(device_type)
-            screen_result['video_embeddings'] = video_embeddings
-            print("Using dummy video embeddings due to recording failure.")  # {{ edit_6 }}
-
-    # Start both threads
-    thread_audio = threading.Thread(target=audio_thread)
-    thread_screen = threading.Thread(target=screen_thread)
-
-    thread_audio.start()
-    thread_screen.start()
-
-    # Wait for both threads to finish
-    thread_audio.join()
-    thread_screen.join()
-
-    return audio_result['audio_tensor'], audio_result['audio_text_inputs'], screen_result['video_embeddings']
+desired_num_frames = 160  # Set desired_num_frames to a multiple of batch_size (16)
 
 # Real-Time Interaction Loop
 def real_time_interaction():
@@ -165,7 +118,7 @@ def real_time_interaction():
         elif user_choice.lower() == 'r':
             # Record audio and screen in parallel
             audio_tensor, audio_text_inputs, video_embeddings = record_audio_and_screen(
-                "user_audio.wav", "user_screen.mp4", DURATION, desired_num_frames=160
+                "user_audio.wav", "user_screen.mp4", DURATION, desired_num_frames=desired_num_frames
             )
             video_input = video_embeddings  # Define video_input
             

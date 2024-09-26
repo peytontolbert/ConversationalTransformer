@@ -16,6 +16,7 @@ class IterationOfThought:
         state_sequence = []
         trajectory = []
         total_reward = 0.0
+        state = input_prompt
 
         for t in range(self.max_iterations):
             # Edit 1: Generate thought and obtain student_logits
@@ -25,12 +26,13 @@ class IterationOfThought:
                 thought_text = "<No Thought Generated>"  # {{ edit_1 }}
             logger.info(f"Iteration {t}: Thought - '{thought_text}'")  # {{ edit_2 }}
 
-            # Update state
-            state = input_prompt + " " + thought_text
-            state_sequence.append(state)
 
+            # Update state
+            state = state + "\n"+ thought_text
+            state_sequence.append(state)
+            
             # Edit 3: Pass student_logits to get_reward
-            reward = self.reward_model.get_reward(state, student_logits)  # {{ edit_3 }}
+            reward = self.reward_model.get_reward(input_prompt, student_logits)  # {{ edit_3 }}
             logger.info(f"Iteration {t}: Reward - {reward}")  # {{ edit_4 }}
 
             # Accumulate discounted reward

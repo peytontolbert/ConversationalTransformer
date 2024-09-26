@@ -19,18 +19,22 @@ text_model = GPT2LMHeadModel.from_pretrained("gpt2").to(device_type)
 # This should match the hidden size used in your StudentTeacherModel and OmniModalTransformer
 hidden_size = text_model.config.hidden_size
 
-
 video_encoder = VideoMAEModel.from_pretrained("MCG-NJU/videomae-base").to(device_type)
+
+# **Added: Check expected number of channels from VideoMAEModel configuration**
+expected_channels = getattr(video_encoder.config, 'num_channels', 3)  # Default to 3 if not present
+print(f"VideoMAEModel expects {expected_channels} channels.")
 
 def record_screen(filename="user_screen.mp4", duration=8, desired_num_frames=160):
     print(f"Recording screen for {duration} seconds.")
-    # OpenCV screen recording setup
-    screen_width = 1920
-    screen_height = 1080
-    fps = 20.0
+    # Dynamic screen resolution
+    screen_width, screen_height = pyautogui.size()
+    logger.info(f"Screen resolution: {screen_width}x{screen_height}")
+    desired_fps = desired_num_frames / duration
+    logger.info(f"Recording at {desired_fps} FPS.")
 
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(filename, fourcc, fps, (screen_width, screen_height))
+    out = cv2.VideoWriter(filename, fourcc, desired_fps, (screen_width, screen_height))
 
     start_time = time.time()
 
@@ -59,6 +63,12 @@ def record_screen(filename="user_screen.mp4", duration=8, desired_num_frames=160
         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         # Process frame with video_feature_extractor
         processed_frame = video_feature_extractor(images=frame, return_tensors="pt")['pixel_values']
+        processed_frame = processed_frame.float()  # Ensure float
+        processed_frame = processed_frame.to(device_type)  # Ensure on correct device
+
+        # **Added: Ensure processed_frame is a dense tensor**
+        if processed_frame.is_sparse:
+            processed_frame = processed_frame.to_dense()
         frames.append(processed_frame)
     cap.release()
 
@@ -82,23 +92,71 @@ def record_screen(filename="user_screen.mp4", duration=8, desired_num_frames=160
                 frames.append(last_frame)
             print(f"Padded frames to {desired_num_frames}")  # {{ edit_4 }}
 
-    # Permute to match VideoMAEModel's expected input shape
-    video_input = torch.cat(frames, dim=0).permute(0, 2, 3, 1).unsqueeze(0).to(device_type)  # Changed permutation to [Batch, Frames, Channels, Height, Width]
-    print(f"video_input shape after to(device): {video_input.shape}")  # Should have shape [1, Frames, Channels, Height, Width]
+    # **Ensuring all frames are dense and on the correct device**
+    for i, frame in enumerate(frames):
+        if frame.is_sparse:
+            frames[i] = frame.to_dense()
 
-    # Process video through video encoder
-    try:
-        with torch.no_grad():
-            video_embeddings = video_encoder(video_input).last_hidden_state  # Expected shape: [1, num_tokens, hidden_size]
-        print(f"video_embeddings shape: {video_embeddings.shape}")  # Added for debugging
+    # Batch processing of frames
+    batch_size = 16  # {{ edit_1: Define batch size }}
+    num_batches = desired_num_frames // batch_size  # {{ edit_2: Calculate number of batches }}
+    video_embeddings_list = []  # {{ edit_3: Initialize list to store embeddings }}
+
+    for batch_idx in range(num_batches):
+        start_idx = batch_idx * batch_size
+        end_idx = start_idx + batch_size
+        batch_frames = frames[start_idx:end_idx]  # {{ edit_4: Slice frames for the current batch }}
         
-        # Optionally aggregate video embeddings (e.g., mean pooling)
-        video_embeddings = video_embeddings.mean(dim=1)  # Shape: [1, hidden_size]
-        print(f"Aggregated video_embeddings shape: {video_embeddings.shape}")  # Added for debugging
-    except Exception as e:
-        logger.error(f"Failed to process video through video_encoder: {e}")  # {{ edit_5 }}
-        # Create dummy video embeddings in case of failure
-        video_embeddings = torch.zeros((1, hidden_size), dtype=torch.float).to(device_type)
-        print("Using dummy video embeddings due to video_encoder processing failure.")  # {{ edit_6 }}
-
-    return video_embeddings  # Return video embeddings
+        frames_tensor = torch.cat(batch_frames, dim=0)  # Shape: [16, 3, 224, 224]
+        frames_tensor = frames_tensor.to(device_type)
+        
+        video_input = frames_tensor.unsqueeze(0)  # Shape: [1, 16, 3, 224, 224]
+        print(f"Processing batch {batch_idx + 1}/{num_batches}: video_input shape: {video_input.shape}")  # {{ edit_5: Debugging }}
+        
+        # **Ensure correct dimensions and channel count**
+        assert video_input.dim() == 5, f"video_input should be 5D, but got {video_input.dim()}D"
+        assert video_input.size(2) == expected_channels, f"Expected {expected_channels} channels, but got {video_input.size(2)}"
+        
+        # **Handle channel mismatch if any**
+        if video_input.size(2) != expected_channels:
+            logger.error(f"Channel mismatch: video_input has {video_input.size(2)} channels, expected {expected_channels}.")
+            # Adjust channels if necessary
+            if expected_channels == 1:
+                # Convert RGB to Grayscale by averaging channels
+                video_input = video_input.mean(dim=2, keepdim=True)
+                print(f"Converted video_input to {video_input.size(2)} channels.")
+            elif expected_channels == 4:
+                # Add an alpha channel
+                alpha_channel = torch.ones((video_input.size(0), video_input.size(1), 1, video_input.size(3), video_input.size(4)), device=device_type)
+                video_input = torch.cat([video_input, alpha_channel], dim=2)
+                print(f"Added alpha channel to video_input.")
+            else:
+                logger.error(f"Cannot adjust channels to {expected_channels}.")
+                raise ValueError(f"Unsupported number of channels: {expected_channels}")
+        
+        # **Ensure correct dtype**
+        video_input = video_input.to(torch.float32)
+        
+        # **Final shape check after adjustments**
+        assert video_input.size(2) == expected_channels, f"After adjustment, expected {expected_channels} channels, but got {video_input.size(2)}"
+        assert video_input.dim() == 5, f"After adjustment, video_input should be 5D, but got {video_input.dim()}D"
+        
+        # Process video batch through video encoder
+        try:
+            with torch.no_grad():
+                batch_embeddings = video_encoder(video_input).last_hidden_state  # Shape: [1, num_tokens, hidden_size]
+            print(f"Batch {batch_idx + 1} video_embeddings shape: {batch_embeddings.shape}")  # {{ edit_6: Debugging }}
+            
+            # Aggregate batch embeddings (e.g., mean pooling)
+            batch_embeddings = batch_embeddings.mean(dim=1)  # Shape: [1, hidden_size]
+            video_embeddings_list.append(batch_embeddings)  # {{ edit_7: Collect embeddings }}
+        except Exception as e:
+            logger.error(f"Failed to process batch {batch_idx + 1} through video_encoder: {e}")  # {{ edit_8 }}
+            video_embeddings_list.append(torch.zeros((1, hidden_size), dtype=torch.float).to(device_type))  # {{ edit_9: Append dummy embedding }}
+            print(f"Using dummy video embeddings for batch {batch_idx + 1} due to processing failure.")  # {{ edit_10 }}
+    
+    # Aggregate all batch embeddings (e.g., mean pooling across batches)
+    video_embeddings = torch.mean(torch.stack(video_embeddings_list), dim=0)  # Shape: [1, hidden_size]
+    print(f"Aggregated video_embeddings shape: {video_embeddings.shape}")  # {{ edit_11: Debugging }}
+    
+    return video_embeddings  # Return aggregated video embeddings

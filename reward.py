@@ -22,6 +22,9 @@ class TransformerRewardModel:
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids)
             teacher_logits = outputs.logits
+        # Decode logits to text and print
+        decoded_output = self.tokenizer.decode(torch.argmax(teacher_logits, dim=-1)[0], skip_special_tokens=True)
+        logger.info(f"Decoded teacher output: {decoded_output}")
         return teacher_logits
 
     def get_reward(self, state, student_logits):  # {{ edit_2 }}

@@ -24,6 +24,15 @@ class StudentTeacherModel(nn.Module):
             teacher_outputs = self.teacher(**text_inputs)
             teacher_logits = teacher_outputs.logits  # Extract teacher logits
 
+        # {{ edit_start: Align sequence lengths of student and teacher logits }}
+        # Determine the minimum sequence length
+        min_seq_length = min(student_logits.size(1), teacher_logits.size(1))
+
+        # Truncate both logits to the minimum sequence length
+        student_logits = student_logits[:, :min_seq_length, :]
+        teacher_logits = teacher_logits[:, :min_seq_length, :]
+        # {{ edit_end: Align sequence lengths }}
+
         # Compute knowledge distillation loss
         loss = self.criterion(
             F.log_softmax(student_logits, dim=-1),
