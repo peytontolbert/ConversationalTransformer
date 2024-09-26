@@ -109,7 +109,7 @@ import threading  # {{ Added for threading }}
 # Update DURATION to capture 160 frames at 20 FPS
 DURATION = 8  # Increased from 5 to 8 seconds
 
-def record_audio_and_screen(audio_filename, screen_filename, duration):
+def record_audio_and_screen(audio_filename, screen_filename, duration, desired_num_frames=160):
     audio_result = {}
     screen_result = {}
 
@@ -119,8 +119,15 @@ def record_audio_and_screen(audio_filename, screen_filename, duration):
         audio_result['audio_text_inputs'] = audio_text_inputs
 
     def screen_thread():
-        video_embeddings = record_screen(screen_filename, duration)
-        screen_result['video_embeddings'] = video_embeddings
+        try:
+            video_embeddings = record_screen(screen_filename, duration, desired_num_frames)
+            screen_result['video_embeddings'] = video_embeddings
+        except Exception as e:
+            logger.error(f"Failed to record screen: {e}")  # {{ edit_5 }}
+            # Create dummy video embeddings in case of failure
+            video_embeddings = torch.zeros((1, hidden_size), dtype=torch.float).to(device_type)
+            screen_result['video_embeddings'] = video_embeddings
+            print("Using dummy video embeddings due to recording failure.")  # {{ edit_6 }}
 
     # Start both threads
     thread_audio = threading.Thread(target=audio_thread)
@@ -213,7 +220,7 @@ def record_audio(filename="user_audio.wav", duration=5):
     
     return audio_tensor, audio_text_inputs  # Return tensors only
 
-def record_screen(filename="user_screen.mp4", duration=5):
+def record_screen(filename="user_screen.mp4", duration=8, desired_num_frames=160):
     print(f"Recording screen for {duration} seconds.")
     # OpenCV screen recording setup
     screen_width = 1920
@@ -245,6 +252,27 @@ def record_screen(filename="user_screen.mp4", duration=5):
         frame = video_feature_extractor(images=frame, return_tensors="pt")['pixel_values']
         frames.append(frame)
     cap.release()
+
+    print(f"Total frames captured: {len(frames)}")  # {{ edit_1 }}
+
+    # Resample frames to desired_num_frames
+    if len(frames) > desired_num_frames:
+        indices = np.linspace(0, len(frames)-1, desired_num_frames).astype(int)
+        frames = [frames[i] for i in indices]
+        print(f"Resampled frames to {desired_num_frames}")  # {{ edit_2 }}
+    elif len(frames) < desired_num_frames:
+        if len(frames) == 0:
+            # If no frames were captured, create dummy frames
+            dummy_frame = torch.zeros((1, 3, 224, 224), dtype=torch.float).to(device_type)
+            frames = [dummy_frame for _ in range(desired_num_frames)]
+            print("No frames captured; filled with zeros.")  # {{ edit_3 }}
+        else:
+            # Pad with the last captured frame to reach desired_num_frames
+            last_frame = frames[-1]
+            while len(frames) < desired_num_frames:
+                frames.append(last_frame)
+            print(f"Padded frames to {desired_num_frames}")  # {{ edit_4 }}
+
     video_input = torch.cat(frames, dim=0).unsqueeze(0).to(device_type)
     print(f"video_input shape after to(device): {video_input.shape}")  # Should now have 5 dimensions
     
@@ -269,7 +297,9 @@ def real_time_interaction():
             break
         elif user_choice.lower() == 'r':
             # Record audio and screen in parallel
-            audio_tensor, audio_text_inputs, video_embeddings = record_audio_and_screen("user_audio.wav", "user_screen.mp4", DURATION)
+            audio_tensor, audio_text_inputs, video_embeddings = record_audio_and_screen(
+                "user_audio.wav", "user_screen.mp4", DURATION, desired_num_frames=160
+            )
             video_input = video_embeddings  # Define video_input
             
             # Optional text input
